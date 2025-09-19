@@ -205,6 +205,16 @@ export default function HomeScreen() {
               {userData.emergencyMode ? '✨ Normaler Modus' : '🆘 Notfall-Modus'}
             </Text>
           </TouchableOpacity>
+
+          {/* Debug Button */}
+          <TouchableOpacity 
+            style={[buttonStyles.outline, { marginBottom: 12, borderColor: colors.warning }]}
+            onPress={() => router.push('/debug')}
+          >
+            <Text style={[commonStyles.buttonText, { color: colors.warning }]}>
+              🔧 Supabase Debug
+            </Text>
+          </TouchableOpacity>
         </View>
 
         {/* Motivational Message */}
