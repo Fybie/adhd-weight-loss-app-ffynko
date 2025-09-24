@@ -52,21 +52,34 @@ export default function HomeScreen() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [todayEntry, setTodayEntry] = useState<any>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     checkAuthAndLoadData();
     
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log('Auth state changed:', event, session?.user?.id);
-      if (session?.user) {
+      
+      if (event === 'SIGNED_IN' && session?.user) {
+        console.log('User signed in:', session.user.id);
         setIsAuthenticated(true);
         setCurrentUserId(session.user.id);
-        loadUserData(session.user.id);
-      } else {
+        setAuthError(null);
+        await loadUserData(session.user.id);
+      } else if (event === 'SIGNED_OUT') {
+        console.log('User signed out');
         setIsAuthenticated(false);
         setCurrentUserId(null);
         setUserData(defaultUserData);
+        setTodayEntry(null);
+        setAuthError(null);
+        setLoading(false);
+      } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+        console.log('Token refreshed for user:', session.user.id);
+        setIsAuthenticated(true);
+        setCurrentUserId(session.user.id);
+        setAuthError(null);
       }
     });
 
@@ -76,7 +89,18 @@ export default function HomeScreen() {
   const checkAuthAndLoadData = async () => {
     try {
       console.log('Checking authentication status...');
-      const { session } = await SupabaseService.getCurrentUser();
+      setLoading(true);
+      setAuthError(null);
+      
+      const { session, error } = await SupabaseService.getCurrentUser();
+      
+      if (error) {
+        console.error('Error getting session:', error);
+        setAuthError('Fehler beim Überprüfen der Anmeldung: ' + error);
+        setIsAuthenticated(false);
+        setLoading(false);
+        return;
+      }
       
       if (session?.user) {
         console.log('User is authenticated:', session.user.id);
@@ -90,6 +114,7 @@ export default function HomeScreen() {
       }
     } catch (error) {
       console.error('Error checking auth:', error);
+      setAuthError('Unerwarteter Fehler beim Überprüfen der Anmeldung');
       setIsAuthenticated(false);
       setLoading(false);
     }
@@ -100,15 +125,21 @@ export default function HomeScreen() {
       console.log('Loading user data for:', userId);
       setLoading(true);
 
-      // Get user profile
-      const { data: userProfile, error: userError } = await SupabaseService.getUser(userId);
+      // Ensure user profile exists
+      const { data: userProfile, error: userError } = await SupabaseService.createUserProfileIfNeeded(userId, '');
       if (userError) {
-        console.log('User profile not found, might be first time user');
+        console.error('Error ensuring user profile:', userError);
+        // Don't fail completely, just use defaults
       }
 
       // Get today's entry
       const today = new Date().toISOString().split('T')[0];
       const { data: entries, error: entriesError } = await SupabaseService.getDailyEntries(userId, 1);
+      
+      if (entriesError) {
+        console.error('Error loading daily entries:', entriesError);
+        // Don't fail completely, just use defaults
+      }
       
       let todaysEntry = null;
       if (entries && entries.length > 0 && entries[0].date === today) {
@@ -119,12 +150,19 @@ export default function HomeScreen() {
       // Get activities for today if entry exists
       let todaysActivities: any[] = [];
       if (todaysEntry) {
-        const { data: activities } = await SupabaseService.getActivities(todaysEntry.id);
-        todaysActivities = activities || [];
+        const { data: activities, error: activitiesError } = await SupabaseService.getActivities(todaysEntry.id);
+        if (activitiesError) {
+          console.error('Error loading activities:', activitiesError);
+        } else {
+          todaysActivities = activities || [];
+        }
       }
 
       // Calculate streak
-      const { streak } = await SupabaseService.calculateStreak(userId);
+      const { streak, error: streakError } = await SupabaseService.calculateStreak(userId);
+      if (streakError) {
+        console.error('Error calculating streak:', streakError);
+      }
 
       // Build user data from database
       const newUserData: UserData = {
@@ -133,7 +171,7 @@ export default function HomeScreen() {
         targetWeight: userProfile?.target_weight || 60,
         dailyPoints: todaysEntry?.total_points || 0,
         totalPoints: 0, // We'll calculate this from all entries
-        streak: streak,
+        streak: streak || 0,
         level: Math.floor((todaysEntry?.total_points || 0) / 100) + 1,
         weighedToday: todaysActivities.some(a => a.activity_type === 'wiegen'),
         exercisedToday: todaysActivities.some(a => a.activity_type === 'sport'),
@@ -144,11 +182,12 @@ export default function HomeScreen() {
         lastActiveDate: today,
       };
 
-      console.log('User data loaded:', newUserData);
+      console.log('User data loaded successfully:', newUserData);
       setUserData(newUserData);
+      setAuthError(null);
     } catch (error) {
       console.error('Error loading user data:', error);
-      Alert.alert('Fehler', 'Daten konnten nicht geladen werden.');
+      setAuthError('Fehler beim Laden der Benutzerdaten');
     } finally {
       setLoading(false);
     }
@@ -273,9 +312,7 @@ export default function HomeScreen() {
     try {
       const { success, error } = await SupabaseService.signOut();
       if (success) {
-        setIsAuthenticated(false);
-        setCurrentUserId(null);
-        setUserData(defaultUserData);
+        // State will be updated by the auth state change listener
         Alert.alert('Erfolg', 'Erfolgreich abgemeldet!');
       } else {
         Alert.alert('Fehler', error || 'Abmeldung fehlgeschlagen');
@@ -291,6 +328,9 @@ export default function HomeScreen() {
       <SafeAreaView style={commonStyles.container}>
         <View style={[commonStyles.container, commonStyles.center]}>
           <Text style={commonStyles.title}>Lade...</Text>
+          <Text style={commonStyles.textSecondary}>
+            Überprüfe Anmeldung und lade Daten...
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -301,9 +341,17 @@ export default function HomeScreen() {
       <SafeAreaView style={commonStyles.container}>
         <View style={[commonStyles.container, commonStyles.center]}>
           <Text style={commonStyles.title}>ADHS Abnehm-Tracker</Text>
-          <Text style={[commonStyles.text, { textAlign: 'center', marginBottom: 32 }]}>
+          <Text style={[commonStyles.text, { textAlign: 'center', marginBottom: 16 }]}>
             Melde dich an, um deine Abnehm-Reise zu starten!
           </Text>
+          
+          {authError && (
+            <View style={[commonStyles.card, { backgroundColor: colors.danger + '20', marginBottom: 16 }]}>
+              <Text style={[commonStyles.text, { color: colors.danger, fontSize: 14, textAlign: 'center' }]}>
+                {authError}
+              </Text>
+            </View>
+          )}
           
           <TouchableOpacity 
             style={[buttonStyles.primary, { marginBottom: 16, width: '80%' }]}
@@ -313,10 +361,28 @@ export default function HomeScreen() {
           </TouchableOpacity>
 
           <TouchableOpacity 
+            style={[buttonStyles.outline, { width: '80%', marginBottom: 16 }]}
+            onPress={checkAuthAndLoadData}
+          >
+            <Text style={[commonStyles.buttonText, { color: colors.primary }]}>
+              🔄 Erneut versuchen
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[buttonStyles.outline, { width: '80%', marginBottom: 16 }]}
+            onPress={() => router.push('/test-auth')}
+          >
+            <Text style={[commonStyles.buttonText, { color: colors.warning }]}>
+              🧪 Auth Test
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
             style={[buttonStyles.outline, { width: '80%' }]}
             onPress={() => router.push('/debug')}
           >
-            <Text style={[commonStyles.buttonText, { color: colors.primary }]}>
+            <Text style={[commonStyles.buttonText, { color: colors.warning }]}>
               🔧 Debug-Modus
             </Text>
           </TouchableOpacity>

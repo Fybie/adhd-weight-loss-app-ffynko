@@ -81,6 +81,70 @@ export class SupabaseService {
     }
   }
 
+  static async createUserProfileIfNeeded(userId: string, email: string): Promise<{ data?: User; error?: string }> {
+    try {
+      console.log('Checking if user profile exists for:', userId);
+      
+      // First check if user profile already exists
+      const { data: existingUser, error: getUserError } = await this.getUser(userId);
+      
+      if (existingUser) {
+        console.log('User profile already exists');
+        return { data: existingUser };
+      }
+      
+      // If user doesn't exist, try to get stored data from AsyncStorage
+      try {
+        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+        const storedDataString = await AsyncStorage.getItem(`pending_user_data_${email}`);
+        
+        if (storedDataString) {
+          const storedData = JSON.parse(storedDataString);
+          console.log('Found stored user data, creating profile:', storedData);
+          
+          const { data: newUser, error: createError } = await this.createUser({
+            id: userId,
+            ...storedData
+          });
+          
+          if (createError) {
+            console.error('Error creating user profile:', createError);
+            return { error: createError };
+          }
+          
+          // Clean up stored data
+          await AsyncStorage.removeItem(`pending_user_data_${email}`);
+          
+          return { data: newUser };
+        }
+      } catch (storageError) {
+        console.log('Could not access stored user data:', storageError);
+      }
+      
+      // If no stored data, create default profile
+      console.log('Creating default user profile');
+      const { data: defaultUser, error: defaultError } = await this.createUser({
+        id: userId,
+        name: 'Neuer Benutzer',
+        height: 160,
+        start_weight: 70,
+        target_weight: 60,
+        age: 30
+      });
+      
+      if (defaultError) {
+        console.error('Error creating default user profile:', defaultError);
+        return { error: defaultError };
+      }
+      
+      return { data: defaultUser };
+      
+    } catch (err) {
+      console.error('Error in createUserProfileIfNeeded:', err);
+      return { error: err instanceof Error ? err.message : 'Unknown error' };
+    }
+  }
+
   // Daily entries operations
   static async createDailyEntry(entryData: DailyEntryInsert): Promise<{ data?: DailyEntry; error?: string }> {
     try {
@@ -213,15 +277,24 @@ export class SupabaseService {
       }
       
       console.log('Sign up successful:', data);
+      
+      // Check if user needs to confirm email
+      if (data.user && !data.user.email_confirmed_at) {
+        return { 
+          success: true, 
+          message: 'Registrierung erfolgreich! Bitte überprüfen Sie Ihre E-Mail und klicken Sie auf den Bestätigungslink, bevor Sie sich anmelden.' 
+        };
+      }
+      
       return { 
         success: true, 
-        message: 'Registrierung erfolgreich! Bitte überprüfen Sie Ihre E-Mail zur Bestätigung.' 
+        message: 'Registrierung erfolgreich! Sie können sich jetzt anmelden.' 
       };
     } catch (err) {
       console.error('Sign up error:', err);
       return { 
         success: false, 
-        error: err instanceof Error ? err.message : 'Unknown error' 
+        error: err instanceof Error ? err.message : 'Unbekannter Fehler bei der Registrierung' 
       };
     }
   }
@@ -236,16 +309,33 @@ export class SupabaseService {
       
       if (error) {
         console.error('Sign in failed:', error);
-        return { success: false, error: error.message };
+        
+        // Provide more user-friendly error messages
+        let userFriendlyError = error.message;
+        if (error.message.includes('Email not confirmed')) {
+          userFriendlyError = 'Bitte bestätigen Sie zuerst Ihre E-Mail-Adresse. Überprüfen Sie Ihr E-Mail-Postfach und klicken Sie auf den Bestätigungslink.';
+        } else if (error.message.includes('Invalid login credentials')) {
+          userFriendlyError = 'Ungültige Anmeldedaten. Bitte überprüfen Sie Ihre E-Mail-Adresse und Ihr Passwort.';
+        } else if (error.message.includes('Too many requests')) {
+          userFriendlyError = 'Zu viele Anmeldeversuche. Bitte warten Sie einen Moment und versuchen Sie es erneut.';
+        }
+        
+        return { success: false, error: userFriendlyError };
       }
       
       console.log('Sign in successful:', data);
+      
+      // Ensure user profile exists
+      if (data.user) {
+        await this.createUserProfileIfNeeded(data.user.id, data.user.email || email);
+      }
+      
       return { success: true, message: 'Anmeldung erfolgreich!' };
     } catch (err) {
       console.error('Sign in error:', err);
       return { 
         success: false, 
-        error: err instanceof Error ? err.message : 'Unknown error' 
+        error: err instanceof Error ? err.message : 'Unbekannter Fehler bei der Anmeldung' 
       };
     }
   }
@@ -266,7 +356,7 @@ export class SupabaseService {
       console.error('Sign out error:', err);
       return { 
         success: false, 
-        error: err instanceof Error ? err.message : 'Unknown error' 
+        error: err instanceof Error ? err.message : 'Unbekannter Fehler bei der Abmeldung' 
       };
     }
   }
@@ -287,7 +377,37 @@ export class SupabaseService {
       console.error('Get session error:', err);
       return { 
         session: null, 
-        error: err instanceof Error ? err.message : 'Unknown error' 
+        error: err instanceof Error ? err.message : 'Unbekannter Fehler beim Abrufen der Sitzung' 
+      };
+    }
+  }
+
+  static async resendConfirmation(email: string): Promise<{ success: boolean; error?: string; message?: string }> {
+    try {
+      console.log('Resending confirmation email to:', email);
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: email,
+        options: {
+          emailRedirectTo: 'https://natively.dev/email-confirmed'
+        }
+      });
+      
+      if (error) {
+        console.error('Resend confirmation failed:', error);
+        return { success: false, error: error.message };
+      }
+      
+      console.log('Confirmation email resent successfully');
+      return { 
+        success: true, 
+        message: 'Bestätigungs-E-Mail wurde erneut gesendet. Bitte überprüfen Sie Ihr Postfach.' 
+      };
+    } catch (err) {
+      console.error('Resend confirmation error:', err);
+      return { 
+        success: false, 
+        error: err instanceof Error ? err.message : 'Fehler beim Senden der Bestätigungs-E-Mail' 
       };
     }
   }
@@ -328,7 +448,7 @@ export class SupabaseService {
       console.error('Calculate streak error:', err);
       return { 
         streak: 0, 
-        error: err instanceof Error ? err.message : 'Unknown error' 
+        error: err instanceof Error ? err.message : 'Fehler bei der Streak-Berechnung' 
       };
     }
   }
