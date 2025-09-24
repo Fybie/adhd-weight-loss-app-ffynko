@@ -14,186 +14,170 @@ interface UserData {
 
 interface DailyGoalsProps {
   userData: UserData;
-  onPointsEarned: (points: number, action: string) => void;
+  onPointsEarned: (points: number, action: string, activityType: string) => void;
   onDataUpdate: (data: any) => void;
 }
 
 export default function DailyGoals({ userData, onPointsEarned, onDataUpdate }: DailyGoalsProps) {
-  const goals = [
-    {
-      id: 'weighed',
-      title: 'Wiegen',
-      emoji: '⚖️',
-      points: 1,
-      completed: userData.weighedToday,
-      description: 'Tägliches Wiegen',
-    },
-    {
-      id: 'exercise',
-      title: userData.emergencyMode ? '2+ Min Sport' : '5+ Min Sport',
-      emoji: '🏃‍♀️',
-      points: userData.emergencyMode ? 1 : 2,
-      completed: userData.exercisedToday,
-      description: userData.emergencyMode ? 'Kurze Bewegung' : 'Mindestens 5 Minuten',
-    },
-    {
-      id: 'meal',
-      title: 'Gesunde Mahlzeit',
-      emoji: '🥗',
-      points: 1,
-      completed: userData.healthyMealToday,
-      description: 'Eine gesunde Mahlzeit',
-    },
-    {
-      id: 'water',
-      title: userData.emergencyMode ? '1L Wasser' : '2L Wasser',
-      emoji: '💧',
-      points: 1,
-      completed: userData.waterToday,
-      description: userData.emergencyMode ? 'Mindestens 1 Liter' : 'Mindestens 2 Liter',
-    },
-  ];
+  const handleGoalPress = (goal: string) => {
+    const goalConfig = {
+      weigh: {
+        points: 1,
+        action: 'Wiegen',
+        activityType: 'wiegen',
+        completed: userData.weighedToday,
+        emoji: '⚖️'
+      },
+      exercise: {
+        points: userData.emergencyMode ? 1 : 2,
+        action: 'Sport (5+ Min)',
+        activityType: 'sport',
+        completed: userData.exercisedToday,
+        emoji: '🏃‍♀️'
+      },
+      meal: {
+        points: 1,
+        action: 'Gesunde Mahlzeit',
+        activityType: 'gesunde_mahlzeit',
+        completed: userData.healthyMealToday,
+        emoji: '🥗'
+      },
+      water: {
+        points: 1,
+        action: '2L Wasser',
+        activityType: 'wasser',
+        completed: userData.waterToday,
+        emoji: '💧'
+      }
+    };
 
-  const handleGoalPress = (goal: any) => {
-    if (goal.completed) {
+    const config = goalConfig[goal as keyof typeof goalConfig];
+    
+    if (!config) return;
+
+    if (config.completed) {
       Alert.alert(
-        '✅ Bereits erledigt!',
-        `Du hast heute schon "${goal.title}" abgehakt.`,
-        [{ text: 'OK', style: 'default' }]
+        'Bereits erledigt! 🎉',
+        `Du hast heute schon ${config.action} gemacht!`,
+        [{ text: 'Super!', style: 'default' }]
       );
       return;
     }
 
     Alert.alert(
-      `${goal.emoji} ${goal.title}`,
-      `Hast du heute "${goal.description}" gemacht?`,
+      `${config.emoji} ${config.action}`,
+      `Hast du ${config.action} gemacht?`,
       [
         { text: 'Nein', style: 'cancel' },
-        {
-          text: 'Ja!',
+        { 
+          text: `Ja! (+${config.points}P)`, 
           style: 'default',
-          onPress: () => {
-            const updatedData = { ...userData };
-            
-            switch (goal.id) {
-              case 'weighed':
-                updatedData.weighedToday = true;
-                break;
-              case 'exercise':
-                updatedData.exercisedToday = true;
-                break;
-              case 'meal':
-                updatedData.healthyMealToday = true;
-                break;
-              case 'water':
-                updatedData.waterToday = true;
-                break;
-            }
-
-            updatedData.dailyPoints += goal.points;
-            updatedData.totalPoints = (updatedData.totalPoints || 0) + goal.points;
-
-            onDataUpdate(updatedData);
-            onPointsEarned(goal.points, goal.title);
-          }
+          onPress: () => onPointsEarned(config.points, config.action, config.activityType)
         }
       ]
     );
   };
 
-  const completedGoals = goals.filter(g => g.completed).length;
-  const totalGoals = goals.length;
-  const progressPercentage = (completedGoals / totalGoals) * 100;
+  const getGoalStyle = (completed: boolean) => [
+    buttonStyles.outline,
+    { 
+      marginBottom: 12,
+      borderColor: completed ? colors.success : colors.border,
+      backgroundColor: completed ? colors.success + '20' : 'transparent'
+    }
+  ];
+
+  const getGoalTextStyle = (completed: boolean) => [
+    commonStyles.buttonText,
+    { 
+      color: completed ? colors.success : colors.text,
+      fontWeight: completed ? '600' : '400'
+    }
+  ];
+
+  const totalPossiblePoints = userData.emergencyMode ? 4 : 5;
+  const progressPercentage = (userData.dailyPoints / totalPossiblePoints) * 100;
 
   return (
     <View style={commonStyles.card}>
-      <View style={[commonStyles.row, { marginBottom: 16 }]}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Text style={commonStyles.subtitle}>
-          {userData.emergencyMode ? 'Notfall-Ziele' : 'Tagesziele'}
+          Tagesziele {userData.emergencyMode ? '(Notfall-Modus)' : ''}
         </Text>
-        <Text style={[commonStyles.text, { color: colors.success }]}>
-          {completedGoals}/{totalGoals}
+        <Text style={[commonStyles.text, { color: colors.primary, fontWeight: '600' }]}>
+          {userData.dailyPoints}/{totalPossiblePoints}P
         </Text>
       </View>
 
       {/* Progress Bar */}
-      <View style={{ marginBottom: 20 }}>
+      <View style={{
+        height: 8,
+        backgroundColor: colors.border,
+        borderRadius: 4,
+        marginBottom: 20,
+        overflow: 'hidden'
+      }}>
         <View style={{
-          backgroundColor: colors.background,
-          height: 8,
-          borderRadius: 4,
-          overflow: 'hidden',
-        }}>
-          <View style={{
-            backgroundColor: colors.success,
-            height: '100%',
-            width: `${progressPercentage}%`,
-            borderRadius: 4,
-          }} />
-        </View>
-        <Text style={[commonStyles.textMuted, { marginTop: 4 }]}>
-          {progressPercentage.toFixed(0)}% der Tagesziele erreicht
-        </Text>
+          height: '100%',
+          width: `${Math.min(progressPercentage, 100)}%`,
+          backgroundColor: colors.success,
+          borderRadius: 4
+        }} />
       </View>
 
-      {/* Goals List */}
-      {goals.map((goal) => (
-        <TouchableOpacity
-          key={goal.id}
-          style={[
-            {
-              backgroundColor: goal.completed ? colors.success : colors.background,
-              borderWidth: 2,
-              borderColor: goal.completed ? colors.success : colors.border,
-              borderRadius: 12,
-              padding: 16,
-              marginBottom: 12,
-              flexDirection: 'row',
-              alignItems: 'center',
-            }
-          ]}
-          onPress={() => handleGoalPress(goal)}
-        >
-          <Text style={{ fontSize: 24, marginRight: 12 }}>
-            {goal.completed ? '✅' : goal.emoji}
-          </Text>
-          
-          <View style={{ flex: 1 }}>
-            <Text style={[
-              commonStyles.text,
-              { 
-                fontWeight: '600',
-                textDecorationLine: goal.completed ? 'line-through' : 'none'
-              }
-            ]}>
-              {goal.title}
-            </Text>
-            <Text style={[
-              commonStyles.textSecondary,
-              { fontSize: 12 }
-            ]}>
-              {goal.description} • {goal.points} Punkt{goal.points > 1 ? 'e' : ''}
-            </Text>
-          </View>
+      {/* Goals */}
+      <TouchableOpacity 
+        style={getGoalStyle(userData.weighedToday)}
+        onPress={() => handleGoalPress('weigh')}
+      >
+        <Text style={getGoalTextStyle(userData.weighedToday)}>
+          ⚖️ Wiegen (+1P) {userData.weighedToday ? '✓' : ''}
+        </Text>
+      </TouchableOpacity>
 
-          {goal.completed && (
-            <Text style={[commonStyles.text, { color: colors.success, fontWeight: '600' }]}>
-              +{goal.points}
-            </Text>
-          )}
-        </TouchableOpacity>
-      ))}
+      <TouchableOpacity 
+        style={getGoalStyle(userData.exercisedToday)}
+        onPress={() => handleGoalPress('exercise')}
+      >
+        <Text style={getGoalTextStyle(userData.exercisedToday)}>
+          🏃‍♀️ Sport 5+ Min (+{userData.emergencyMode ? 1 : 2}P) {userData.exercisedToday ? '✓' : ''}
+        </Text>
+      </TouchableOpacity>
 
-      {/* Encouragement */}
-      {userData.emergencyMode && (
+      <TouchableOpacity 
+        style={getGoalStyle(userData.healthyMealToday)}
+        onPress={() => handleGoalPress('meal')}
+      >
+        <Text style={getGoalTextStyle(userData.healthyMealToday)}>
+          🥗 Gesunde Mahlzeit (+1P) {userData.healthyMealToday ? '✓' : ''}
+        </Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity 
+        style={getGoalStyle(userData.waterToday)}
+        onPress={() => handleGoalPress('water')}
+      >
+        <Text style={getGoalTextStyle(userData.waterToday)}>
+          💧 2L Wasser (+1P) {userData.waterToday ? '✓' : ''}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Motivational message */}
+      {userData.dailyPoints >= totalPossiblePoints && (
         <View style={{
-          backgroundColor: colors.warning,
-          padding: 12,
-          borderRadius: 8,
-          marginTop: 8,
+          backgroundColor: colors.success + '20',
+          padding: 16,
+          borderRadius: 12,
+          marginTop: 16,
+          borderWidth: 1,
+          borderColor: colors.success
         }}>
-          <Text style={[commonStyles.text, { textAlign: 'center', fontSize: 14 }]}>
-            💙 Notfall-Modus: Reduzierte Ziele für heute. Du schaffst das!
+          <Text style={[commonStyles.text, { 
+            textAlign: 'center', 
+            color: colors.success, 
+            fontWeight: '600' 
+          }]}>
+            🎉 Alle Tagesziele erreicht! Du bist fantastisch! 🌟
           </Text>
         </View>
       )}

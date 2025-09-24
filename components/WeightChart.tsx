@@ -2,7 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Dimensions } from 'react-native';
 import { commonStyles, colors } from '../styles/commonStyles';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SupabaseService } from '../services/supabaseService';
 
 interface WeightEntry {
   weight: number;
@@ -16,8 +16,7 @@ interface WeightChartProps {
 
 export default function WeightChart({ currentWeight, targetWeight }: WeightChartProps) {
   const [weightHistory, setWeightHistory] = useState<WeightEntry[]>([]);
-  const screenWidth = Dimensions.get('window').width;
-  const chartWidth = screenWidth - 80; // Account for padding
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadWeightHistory();
@@ -25,76 +24,219 @@ export default function WeightChart({ currentWeight, targetWeight }: WeightChart
 
   const loadWeightHistory = async () => {
     try {
-      const stored = await AsyncStorage.getItem('weightHistory');
-      if (stored) {
-        const history = JSON.parse(stored);
-        setWeightHistory(history.slice(-30)); // Last 30 entries
+      const { session } = await SupabaseService.getCurrentUser();
+      if (!session?.user) {
+        setLoading(false);
+        return;
       }
+
+      // Get recent daily entries with weight data
+      const { data: entries, error } = await SupabaseService.getDailyEntries(session.user.id, 30);
+      
+      if (error) {
+        console.error('Error loading weight history:', error);
+        setLoading(false);
+        return;
+      }
+
+      // Filter entries that have weight data and convert to WeightEntry format
+      const weightEntries: WeightEntry[] = (entries || [])
+        .filter(entry => entry.weight !== null)
+        .map(entry => ({
+          weight: entry.weight!,
+          date: entry.date
+        }))
+        .reverse(); // Show oldest first
+
+      setWeightHistory(weightEntries);
     } catch (error) {
-      console.log('Error loading weight history:', error);
+      console.error('Error loading weight history:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const weightLoss = currentWeight - targetWeight;
-  const progressPercentage = Math.max(0, Math.min(100, 
-    ((72 - currentWeight) / (72 - targetWeight)) * 100
-  ));
-
   const renderSimpleChart = () => {
-    if (weightHistory.length < 2) {
+    if (loading) {
       return (
-        <View style={{
-          height: 120,
-          backgroundColor: colors.background,
-          borderRadius: 8,
-          justifyContent: 'center',
-          alignItems: 'center',
-        }}>
-          <Text style={[commonStyles.textSecondary, { textAlign: 'center' }]}>
-            📊 Dein Gewichtsverlauf wird hier angezeigt{'\n'}
-            sobald du mehr Einträge hast
-          </Text>
-        </View>
+        <Text style={[commonStyles.text, { textAlign: 'center', color: colors.textSecondary }]}>
+          Lade Gewichtsverlauf...
+        </Text>
       );
     }
 
-    const maxWeight = Math.max(...weightHistory.map(w => w.weight));
-    const minWeight = Math.min(...weightHistory.map(w => w.weight));
-    const range = maxWeight - minWeight || 1;
+    if (weightHistory.length === 0) {
+      return (
+        <Text style={[commonStyles.text, { textAlign: 'center', color: colors.textSecondary }]}>
+          Noch keine Gewichtsdaten vorhanden.
+          {'\n'}Trage dein erstes Gewicht ein!
+        </Text>
+      );
+    }
+
+    const screenWidth = Dimensions.get('window').width - 80; // Account for padding
+    const chartHeight = 120;
+    
+    // Calculate weight range for scaling
+    const weights = weightHistory.map(entry => entry.weight);
+    const minWeight = Math.min(...weights, targetWeight) - 2;
+    const maxWeight = Math.max(...weights) + 2;
+    const weightRange = maxWeight - minWeight;
+
+    // Calculate progress
+    const startWeight = weightHistory[0]?.weight || currentWeight;
+    const totalWeightToLose = startWeight - targetWeight;
+    const weightLost = startWeight - currentWeight;
+    const progressPercentage = totalWeightToLose > 0 ? (weightLost / totalWeightToLose) * 100 : 0;
 
     return (
-      <View style={{
-        height: 120,
-        backgroundColor: colors.background,
-        borderRadius: 8,
-        padding: 16,
-        justifyContent: 'flex-end',
-      }}>
-        <View style={{
-          flexDirection: 'row',
-          alignItems: 'flex-end',
-          height: 80,
+      <View>
+        {/* Progress Summary */}
+        <View style={{ 
+          flexDirection: 'row', 
+          justifyContent: 'space-between', 
+          marginBottom: 16,
+          paddingHorizontal: 8
         }}>
-          {weightHistory.map((entry, index) => {
-            const height = ((maxWeight - entry.weight) / range) * 60 + 20;
-            return (
-              <View
-                key={index}
-                style={{
-                  width: Math.max(2, (chartWidth - 32) / weightHistory.length - 2),
-                  height: height,
-                  backgroundColor: colors.success,
-                  marginRight: 2,
-                  borderRadius: 1,
-                }}
-              />
-            );
-          })}
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[commonStyles.textSecondary, { fontSize: 12 }]}>Start</Text>
+            <Text style={[commonStyles.text, { fontWeight: '600' }]}>
+              {startWeight.toFixed(1)}kg
+            </Text>
+          </View>
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[commonStyles.textSecondary, { fontSize: 12 }]}>Aktuell</Text>
+            <Text style={[commonStyles.text, { fontWeight: '600', color: colors.primary }]}>
+              {currentWeight.toFixed(1)}kg
+            </Text>
+          </View>
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[commonStyles.textSecondary, { fontSize: 12 }]}>Ziel</Text>
+            <Text style={[commonStyles.text, { fontWeight: '600', color: colors.success }]}>
+              {targetWeight.toFixed(1)}kg
+            </Text>
+          </View>
         </View>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 }}>
-          <Text style={commonStyles.textMuted}>{minWeight.toFixed(1)}kg</Text>
-          <Text style={commonStyles.textMuted}>{maxWeight.toFixed(1)}kg</Text>
+
+        {/* Progress Bar */}
+        <View style={{
+          height: 12,
+          backgroundColor: colors.border,
+          borderRadius: 6,
+          marginBottom: 16,
+          overflow: 'hidden'
+        }}>
+          <View style={{
+            height: '100%',
+            width: `${Math.max(0, Math.min(progressPercentage, 100))}%`,
+            backgroundColor: colors.success,
+            borderRadius: 6
+          }} />
         </View>
+
+        {/* Progress Text */}
+        <Text style={[commonStyles.text, { textAlign: 'center', marginBottom: 16 }]}>
+          {weightLost > 0 
+            ? `🎉 ${weightLost.toFixed(1)}kg abgenommen! (${progressPercentage.toFixed(0)}%)`
+            : 'Deine Abnehm-Reise beginnt hier! 💪'
+          }
+        </Text>
+
+        {/* Simple Chart Visualization */}
+        <View style={{
+          height: chartHeight,
+          backgroundColor: colors.surface,
+          borderRadius: 8,
+          padding: 12,
+          position: 'relative'
+        }}>
+          {/* Chart Title */}
+          <Text style={[commonStyles.textSecondary, { 
+            fontSize: 12, 
+            textAlign: 'center', 
+            marginBottom: 8 
+          }]}>
+            Gewichtsverlauf ({weightHistory.length} Einträge)
+          </Text>
+
+          {/* Simple Line Representation */}
+          <View style={{ 
+            flex: 1, 
+            flexDirection: 'row', 
+            alignItems: 'flex-end',
+            justifyContent: 'space-between'
+          }}>
+            {weightHistory.slice(-7).map((entry, index) => {
+              const height = ((entry.weight - minWeight) / weightRange) * (chartHeight - 40);
+              const isLatest = index === weightHistory.slice(-7).length - 1;
+              
+              return (
+                <View key={entry.date} style={{ alignItems: 'center', flex: 1 }}>
+                  <View style={{
+                    width: 8,
+                    height: Math.max(height, 4),
+                    backgroundColor: isLatest ? colors.primary : colors.success,
+                    borderRadius: 4,
+                    marginBottom: 4
+                  }} />
+                  <Text style={[commonStyles.textSecondary, { 
+                    fontSize: 10,
+                    transform: [{ rotate: '-45deg' }],
+                    width: 30,
+                    textAlign: 'center'
+                  }]}>
+                    {new Date(entry.date).getDate()}.{new Date(entry.date).getMonth() + 1}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* Target Line */}
+          <View style={{
+            position: 'absolute',
+            left: 12,
+            right: 12,
+            bottom: 32 + ((targetWeight - minWeight) / weightRange) * (chartHeight - 40),
+            height: 1,
+            backgroundColor: colors.danger,
+            opacity: 0.7
+          }} />
+          <Text style={{
+            position: 'absolute',
+            right: 16,
+            bottom: 28 + ((targetWeight - minWeight) / weightRange) * (chartHeight - 40),
+            fontSize: 10,
+            color: colors.danger,
+            backgroundColor: colors.surface,
+            paddingHorizontal: 4
+          }}>
+            Ziel
+          </Text>
+        </View>
+
+        {/* Recent Entries */}
+        {weightHistory.length > 0 && (
+          <View style={{ marginTop: 16 }}>
+            <Text style={[commonStyles.textSecondary, { fontSize: 12, marginBottom: 8 }]}>
+              Letzte Einträge:
+            </Text>
+            {weightHistory.slice(-3).reverse().map((entry, index) => (
+              <View key={entry.date} style={{ 
+                flexDirection: 'row', 
+                justifyContent: 'space-between',
+                paddingVertical: 4
+              }}>
+                <Text style={[commonStyles.textSecondary, { fontSize: 12 }]}>
+                  {new Date(entry.date).toLocaleDateString('de-DE')}
+                </Text>
+                <Text style={[commonStyles.text, { fontSize: 12, fontWeight: '600' }]}>
+                  {entry.weight.toFixed(1)}kg
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
       </View>
     );
   };
@@ -104,62 +246,6 @@ export default function WeightChart({ currentWeight, targetWeight }: WeightChart
       <Text style={[commonStyles.subtitle, { marginBottom: 16 }]}>
         Gewichtsverlauf
       </Text>
-
-      {/* Current Stats */}
-      <View style={[commonStyles.row, { marginBottom: 16 }]}>
-        <View style={{ flex: 1 }}>
-          <Text style={[commonStyles.textSecondary, { marginBottom: 4 }]}>
-            Aktuell
-          </Text>
-          <Text style={[commonStyles.text, { fontSize: 20, fontWeight: '600' }]}>
-            {currentWeight}kg
-          </Text>
-        </View>
-        
-        <View style={{ flex: 1, alignItems: 'center' }}>
-          <Text style={[commonStyles.textSecondary, { marginBottom: 4 }]}>
-            Noch zu verlieren
-          </Text>
-          <Text style={[commonStyles.text, { 
-            fontSize: 20, 
-            fontWeight: '600',
-            color: weightLoss > 0 ? colors.warning : colors.success
-          }]}>
-            {weightLoss > 0 ? `${weightLoss.toFixed(1)}kg` : 'Ziel erreicht! 🎉'}
-          </Text>
-        </View>
-        
-        <View style={{ flex: 1, alignItems: 'flex-end' }}>
-          <Text style={[commonStyles.textSecondary, { marginBottom: 4 }]}>
-            Ziel
-          </Text>
-          <Text style={[commonStyles.text, { fontSize: 20, fontWeight: '600' }]}>
-            {targetWeight}kg
-          </Text>
-        </View>
-      </View>
-
-      {/* Progress Bar */}
-      <View style={{ marginBottom: 16 }}>
-        <Text style={[commonStyles.textSecondary, { marginBottom: 8 }]}>
-          Fortschritt: {progressPercentage.toFixed(1)}%
-        </Text>
-        <View style={{
-          backgroundColor: colors.background,
-          height: 8,
-          borderRadius: 4,
-          overflow: 'hidden',
-        }}>
-          <View style={{
-            backgroundColor: colors.success,
-            height: '100%',
-            width: `${progressPercentage}%`,
-            borderRadius: 4,
-          }} />
-        </View>
-      </View>
-
-      {/* Simple Chart */}
       {renderSimpleChart()}
     </View>
   );

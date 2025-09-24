@@ -4,163 +4,206 @@ import { View, Text, TextInput, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { commonStyles, colors, buttonStyles } from '../styles/commonStyles';
 import { router } from 'expo-router';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import ConfettiCannon from 'react-native-confetti-cannon';
+import { SupabaseService } from '../services/supabaseService';
 
 export default function WeightScreen() {
   const [weight, setWeight] = useState('');
+  const [currentWeight, setCurrentWeight] = useState(0);
+  const [targetWeight, setTargetWeight] = useState(0);
   const [showConfetti, setShowConfetti] = useState(false);
-  const [currentWeight, setCurrentWeight] = useState(72);
+  const [loading, setLoading] = useState(true);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    loadCurrentWeight();
+    loadCurrentData();
   }, []);
 
-  const loadCurrentWeight = async () => {
+  const loadCurrentData = async () => {
     try {
-      const stored = await AsyncStorage.getItem('userData');
-      if (stored) {
-        const userData = JSON.parse(stored);
-        setCurrentWeight(userData.currentWeight);
+      const { session } = await SupabaseService.getCurrentUser();
+      if (!session?.user) {
+        Alert.alert('Fehler', 'Nicht angemeldet', [
+          { text: 'OK', onPress: () => router.back() }
+        ]);
+        return;
       }
+
+      setCurrentUserId(session.user.id);
+
+      // Get user profile for current and target weight
+      const { data: userProfile } = await SupabaseService.getUser(session.user.id);
+      if (userProfile) {
+        setCurrentWeight(userProfile.start_weight || 0);
+        setTargetWeight(userProfile.target_weight || 0);
+      }
+
+      // Get latest weight from daily entries
+      const { data: entries } = await SupabaseService.getDailyEntries(session.user.id, 1);
+      if (entries && entries.length > 0 && entries[0].weight) {
+        setCurrentWeight(entries[0].weight);
+      }
+
     } catch (error) {
-      console.log('Error loading weight:', error);
+      console.error('Error loading weight data:', error);
+      Alert.alert('Fehler', 'Daten konnten nicht geladen werden.');
+    } finally {
+      setLoading(false);
     }
   };
 
   const saveWeight = async () => {
-    if (!weight || isNaN(parseFloat(weight))) {
-      Alert.alert('Fehler', 'Bitte gib ein gültiges Gewicht ein.');
+    if (!weight || !currentUserId) {
+      Alert.alert('Fehler', 'Bitte Gewicht eingeben.');
       return;
     }
 
-    const newWeight = parseFloat(weight);
-    
+    const weightNum = parseFloat(weight);
+    if (isNaN(weightNum) || weightNum <= 0) {
+      Alert.alert('Fehler', 'Bitte gültiges Gewicht eingeben.');
+      return;
+    }
+
     try {
-      const stored = await AsyncStorage.getItem('userData');
-      if (stored) {
-        const userData = JSON.parse(stored);
-        
-        // Save weight history
-        const weightHistory = await AsyncStorage.getItem('weightHistory');
-        const history = weightHistory ? JSON.parse(weightHistory) : [];
-        history.push({
-          weight: newWeight,
-          date: new Date().toISOString(),
+      // Get or create today's entry
+      const today = new Date().toISOString().split('T')[0];
+      let { data: entries } = await SupabaseService.getDailyEntries(currentUserId, 1);
+      
+      let todayEntry = null;
+      if (entries && entries.length > 0 && entries[0].date === today) {
+        todayEntry = entries[0];
+      }
+
+      if (todayEntry) {
+        // Update existing entry
+        const { error } = await SupabaseService.updateDailyEntry(todayEntry.id, {
+          weight: weightNum
         });
-        await AsyncStorage.setItem('weightHistory', JSON.stringify(history));
-
-        // Update user data
-        const updatedData = {
-          ...userData,
-          currentWeight: newWeight,
-          weighedToday: true,
-          dailyPoints: userData.weighedToday ? userData.dailyPoints : userData.dailyPoints + 1,
-          totalPoints: userData.weighedToday ? userData.totalPoints : userData.totalPoints + 1,
-        };
-
-        await AsyncStorage.setItem('userData', JSON.stringify(updatedData));
-
-        if (!userData.weighedToday) {
-          setShowConfetti(true);
-          setTimeout(() => setShowConfetti(false), 3000);
-          
-          Alert.alert(
-            '🎉 Gewicht gespeichert!',
-            `+1 Punkt fürs Wiegen!\nNeues Gewicht: ${newWeight}kg`,
-            [
-              { 
-                text: 'Weiter so!', 
-                onPress: () => router.back(),
-                style: 'default' 
-              }
-            ]
-          );
-        } else {
-          Alert.alert(
-            '✅ Gewicht aktualisiert',
-            `Gewicht auf ${newWeight}kg aktualisiert`,
-            [
-              { 
-                text: 'OK', 
-                onPress: () => router.back(),
-                style: 'default' 
-              }
-            ]
-          );
+        if (error) {
+          Alert.alert('Fehler', 'Gewicht konnte nicht gespeichert werden.');
+          return;
+        }
+      } else {
+        // Create new entry
+        const { error } = await SupabaseService.createDailyEntry({
+          user_id: currentUserId,
+          date: today,
+          weight: weightNum,
+          total_points: 0
+        });
+        if (error) {
+          Alert.alert('Fehler', 'Gewicht konnte nicht gespeichert werden.');
+          return;
         }
       }
+
+      const weightDiff = currentWeight - weightNum;
+      const isProgress = weightDiff > 0;
+
+      if (isProgress) {
+        setShowConfetti(true);
+        setTimeout(() => setShowConfetti(false), 3000);
+      }
+
+      Alert.alert(
+        isProgress ? '🎉 Fortschritt!' : '📊 Gewicht gespeichert',
+        isProgress 
+          ? `Du hast ${weightDiff.toFixed(1)}kg abgenommen! Weiter so! 💪`
+          : `Gewicht ${weightNum}kg gespeichert.`,
+        [
+          { 
+            text: 'Zurück zur Übersicht', 
+            onPress: () => router.back()
+          }
+        ]
+      );
+
     } catch (error) {
-      console.log('Error saving weight:', error);
+      console.error('Error saving weight:', error);
       Alert.alert('Fehler', 'Gewicht konnte nicht gespeichert werden.');
     }
   };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={commonStyles.container}>
+        <View style={[commonStyles.container, commonStyles.center]}>
+          <Text style={commonStyles.title}>Lade...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={commonStyles.container}>
       <View style={commonStyles.content}>
         {/* Header */}
         <View style={{ marginBottom: 32 }}>
-          <TouchableOpacity 
-            onPress={() => router.back()}
-            style={{ marginBottom: 16 }}
-          >
-            <Text style={[commonStyles.text, { color: colors.blue }]}>← Zurück</Text>
-          </TouchableOpacity>
-          
           <Text style={commonStyles.title}>Gewicht eingeben</Text>
           <Text style={commonStyles.textSecondary}>
-            Aktuelles Gewicht: {currentWeight}kg
+            Aktuell: {currentWeight}kg → Ziel: {targetWeight}kg
           </Text>
         </View>
 
         {/* Weight Input */}
         <View style={commonStyles.card}>
-          <Text style={[commonStyles.subtitle, { marginBottom: 16 }]}>Neues Gewicht</Text>
+          <Text style={[commonStyles.subtitle, { marginBottom: 16 }]}>
+            Heutiges Gewicht
+          </Text>
           
-          <View style={{
-            backgroundColor: colors.background,
-            borderRadius: 12,
-            borderWidth: 2,
-            borderColor: colors.border,
-            paddingHorizontal: 16,
-            paddingVertical: 12,
-            marginBottom: 24,
-          }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 24 }}>
             <TextInput
-              style={[commonStyles.text, { fontSize: 24, textAlign: 'center' }]}
+              style={[
+                commonStyles.input,
+                { 
+                  flex: 1, 
+                  fontSize: 24, 
+                  textAlign: 'center',
+                  marginRight: 12
+                }
+              ]}
               value={weight}
               onChangeText={setWeight}
-              placeholder="z.B. 71.5"
-              placeholderTextColor={colors.textMuted}
+              placeholder={currentWeight.toString()}
               keyboardType="decimal-pad"
               autoFocus
             />
+            <Text style={[commonStyles.text, { fontSize: 20, fontWeight: '600' }]}>
+              kg
+            </Text>
           </View>
-
-          <Text style={[commonStyles.textMuted, { textAlign: 'center', marginBottom: 24 }]}>
-            Gib dein Gewicht in Kilogramm ein
-          </Text>
 
           <TouchableOpacity 
             style={buttonStyles.primary}
             onPress={saveWeight}
           >
-            <Text style={commonStyles.buttonText}>💾 Gewicht speichern</Text>
+            <Text style={commonStyles.buttonText}>
+              ⚖️ Gewicht speichern (+1 Punkt)
+            </Text>
           </TouchableOpacity>
         </View>
 
-        {/* Motivation */}
-        <View style={[commonStyles.card, { backgroundColor: colors.success, marginTop: 24 }]}>
+        {/* Progress Info */}
+        <View style={[commonStyles.card, { backgroundColor: colors.accent }]}>
           <Text style={[commonStyles.text, { textAlign: 'center', fontWeight: '600' }]}>
-            🎯 Jede Messung bringt dich deinem Ziel näher!
+            💡 Tipp: Wiege dich jeden Tag zur gleichen Zeit für die besten Ergebnisse!
           </Text>
         </View>
+
+        {/* Back Button */}
+        <TouchableOpacity 
+          style={[buttonStyles.outline, { marginTop: 16 }]}
+          onPress={() => router.back()}
+        >
+          <Text style={[commonStyles.buttonText, { color: colors.text }]}>
+            Zurück
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {showConfetti && (
         <ConfettiCannon
-          count={150}
+          count={200}
           origin={{x: -10, y: 0}}
           autoStart={true}
           fadeOut={true}
