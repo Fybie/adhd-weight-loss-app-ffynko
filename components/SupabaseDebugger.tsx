@@ -23,6 +23,15 @@ interface ConnectionStatus {
   authStatus: string;
   lastChecked: string;
   tablesCount: number;
+  rlsPoliciesCount: number;
+  currentUserId?: string;
+}
+
+interface TestResults {
+  connection: boolean;
+  database: boolean;
+  auth: boolean;
+  rls: boolean;
 }
 
 const SupabaseDebugger: React.FC = () => {
@@ -32,9 +41,17 @@ const SupabaseDebugger: React.FC = () => {
     projectUrl: '',
     authStatus: 'Unknown',
     lastChecked: '',
-    tablesCount: 0
+    tablesCount: 0,
+    rlsPoliciesCount: 0
+  });
+  const [testResults, setTestResults] = useState<TestResults>({
+    connection: false,
+    database: false,
+    auth: false,
+    rls: false
   });
   const [isLoading, setIsLoading] = useState(false);
+  const [testingPhase, setTestingPhase] = useState<string>('');
 
   useEffect(() => {
     testConnection();
@@ -60,9 +77,11 @@ const SupabaseDebugger: React.FC = () => {
       
       if (url.includes('supabase.co')) {
         const method = args[1]?.method || 'GET';
+        const endpoint = url.replace('https://fvzhybddmulufmfjuvwl.supabase.co', '');
+        
         addApiCall({
           method: method,
-          endpoint: url.replace('https://fvzhybddmulufmfjuvwl.supabase.co', ''),
+          endpoint: endpoint,
           status: 'pending'
         });
 
@@ -72,7 +91,7 @@ const SupabaseDebugger: React.FC = () => {
           
           addApiCall({
             method: method,
-            endpoint: url.replace('https://fvzhybddmulufmfjuvwl.supabase.co', ''),
+            endpoint: endpoint,
             status: response.ok ? 'success' : 'error',
             duration,
             data: `${response.status} ${response.statusText}`
@@ -83,7 +102,7 @@ const SupabaseDebugger: React.FC = () => {
           const duration = Date.now() - startTime;
           addApiCall({
             method: method,
-            endpoint: url.replace('https://fvzhybddmulufmfjuvwl.supabase.co', ''),
+            endpoint: endpoint,
             status: 'error',
             duration,
             error: error instanceof Error ? error.message : 'Unknown error'
@@ -98,7 +117,8 @@ const SupabaseDebugger: React.FC = () => {
 
   const testConnection = async () => {
     setIsLoading(true);
-    console.log('=== Starting Supabase Connection Test ===');
+    setTestingPhase('Verbindung testen...');
+    console.log('=== Starting Comprehensive Supabase Connection Test ===');
     
     try {
       // Test basic connection using service
@@ -113,6 +133,26 @@ const SupabaseDebugger: React.FC = () => {
         .select('table_name')
         .eq('table_schema', 'public');
 
+      // Count RLS policies
+      const { data: policiesData, error: policiesError } = await supabase
+        .rpc('count_rls_policies');
+
+      let policiesCount = 0;
+      if (!policiesError && policiesData) {
+        policiesCount = policiesData;
+      } else {
+        // Fallback: try to count manually
+        try {
+          const { data: manualPolicies } = await supabase
+            .from('pg_policies')
+            .select('policyname')
+            .eq('schemaname', 'public');
+          policiesCount = manualPolicies?.length || 0;
+        } catch (e) {
+          console.log('Could not count policies manually');
+        }
+      }
+
       addApiCall({
         method: 'SELECT',
         endpoint: 'information_schema.tables',
@@ -121,18 +161,24 @@ const SupabaseDebugger: React.FC = () => {
         error: tablesError?.message
       });
 
-      setConnectionStatus({
+      const newConnectionStatus: ConnectionStatus = {
         isConnected: connectionResult.success,
         projectUrl: supabase.supabaseUrl,
-        authStatus: session ? `Authenticated (${session.user.email})` : 'Not authenticated',
+        authStatus: session ? `✅ Authenticated (${session.user.email})` : '❌ Not authenticated',
         lastChecked: new Date().toLocaleTimeString(),
-        tablesCount: tablesData?.length || 0
-      });
+        tablesCount: tablesData?.length || 0,
+        rlsPoliciesCount: policiesCount,
+        currentUserId: session?.user?.id
+      };
+
+      setConnectionStatus(newConnectionStatus);
+      setTestResults(prev => ({ ...prev, connection: connectionResult.success }));
 
       console.log('=== Connection Test Results ===');
       console.log('Connected:', connectionResult.success);
       console.log('Auth Status:', session ? 'Authenticated' : 'Not authenticated');
       console.log('Tables Count:', tablesData?.length || 0);
+      console.log('RLS Policies Count:', policiesCount);
       
     } catch (err) {
       console.error('=== Connection Test Failed ===', err);
@@ -148,42 +194,119 @@ const SupabaseDebugger: React.FC = () => {
         isConnected: false,
         lastChecked: new Date().toLocaleTimeString()
       }));
+      setTestResults(prev => ({ ...prev, connection: false }));
     } finally {
       setIsLoading(false);
+      setTestingPhase('');
     }
   };
 
   const testDatabaseOperations = async () => {
-    console.log('=== Testing Database Operations ===');
+    setTestingPhase('Datenbank testen...');
+    console.log('=== Testing Database Operations with SupabaseService ===');
     
     try {
-      // Test creating a daily entry (will fail due to RLS but we can see the API call)
+      let hasErrors = false;
+
+      // Test 1: Create a test user (will fail due to RLS if not authenticated)
+      console.log('Testing user creation...');
+      const testUserData = {
+        id: '00000000-0000-0000-0000-000000000000',
+        name: 'Test User',
+        height: 170,
+        start_weight: 70,
+        target_weight: 60,
+        age: 30
+      };
+
+      const createUserResult = await SupabaseService.createUser(testUserData);
+      if (createUserResult.error) {
+        console.log('User creation failed (expected due to RLS):', createUserResult.error);
+        hasErrors = true;
+      }
+
+      // Test 2: Try to get user data
+      console.log('Testing user retrieval...');
+      const getUserResult = await SupabaseService.getUser('00000000-0000-0000-0000-000000000000');
+      if (getUserResult.error) {
+        console.log('User retrieval failed (expected due to RLS):', getUserResult.error);
+        hasErrors = true;
+      }
+
+      // Test 3: Create a daily entry
+      console.log('Testing daily entry creation...');
       const testEntry = {
-        user_id: '00000000-0000-0000-0000-000000000000',
+        user_id: connectionStatus.currentUserId || '00000000-0000-0000-0000-000000000000',
         date: new Date().toISOString().split('T')[0],
         total_points: 5,
         mood: 'gut' as const,
         notes: 'Test entry from debugger'
       };
 
-      const createResult = await SupabaseService.createDailyEntry(testEntry);
-      
-      // Test selecting daily entries
-      const selectResult = await SupabaseService.getDailyEntries('00000000-0000-0000-0000-000000000000', 5);
+      const createEntryResult = await SupabaseService.createDailyEntry(testEntry);
+      if (createEntryResult.error) {
+        console.log('Daily entry creation failed:', createEntryResult.error);
+        hasErrors = true;
+      } else {
+        console.log('Daily entry created successfully:', createEntryResult.data);
+      }
 
-      // Test selecting from users table
-      const { data: usersData, error: usersError } = await supabase
-        .from('users')
-        .select('*')
-        .limit(5);
+      // Test 4: Get daily entries
+      console.log('Testing daily entries retrieval...');
+      const getEntriesResult = await SupabaseService.getDailyEntries(
+        connectionStatus.currentUserId || '00000000-0000-0000-0000-000000000000', 
+        5
+      );
+      if (getEntriesResult.error) {
+        console.log('Daily entries retrieval failed:', getEntriesResult.error);
+        hasErrors = true;
+      } else {
+        console.log('Daily entries retrieved:', getEntriesResult.data?.length || 0, 'entries');
+      }
 
-      addApiCall({
-        method: 'SELECT',
-        endpoint: 'users (sample)',
-        status: usersError ? 'error' : 'success',
-        data: usersData ? `${usersData.length} users` : 'No data',
-        error: usersError?.message
-      });
+      // Test 5: Calculate streak
+      console.log('Testing streak calculation...');
+      const streakResult = await SupabaseService.calculateStreak(
+        connectionStatus.currentUserId || '00000000-0000-0000-0000-000000000000'
+      );
+      if (streakResult.error) {
+        console.log('Streak calculation failed:', streakResult.error);
+        hasErrors = true;
+      } else {
+        console.log('Streak calculated:', streakResult.streak);
+      }
+
+      // Test 6: Test table access directly
+      const tables = ['users', 'daily_entries', 'activities', 'progress_photos'];
+      for (const table of tables) {
+        console.log(`Testing direct access to ${table}...`);
+        const { data, error } = await supabase
+          .from(table)
+          .select('*')
+          .limit(1);
+
+        addApiCall({
+          method: 'SELECT',
+          endpoint: `${table} (direct access)`,
+          status: error ? 'error' : 'success',
+          data: data ? `${data.length} rows` : 'No data',
+          error: error?.message
+        });
+
+        if (error) {
+          hasErrors = true;
+        }
+      }
+
+      setTestResults(prev => ({ ...prev, database: !hasErrors }));
+
+      Alert.alert(
+        'Database Test Results',
+        `Database operations test completed.\n\n` +
+        `Status: ${!hasErrors ? '✅ Success' : '⚠️ Some operations failed (likely due to RLS)'}\n\n` +
+        `This is expected behavior when not authenticated, as RLS policies protect the data.`,
+        [{ text: 'OK' }]
+      );
 
       console.log('=== Database Operations Test Completed ===');
       
@@ -195,27 +318,69 @@ const SupabaseDebugger: React.FC = () => {
         status: 'error',
         error: err instanceof Error ? err.message : 'Unknown error'
       });
+      setTestResults(prev => ({ ...prev, database: false }));
+    } finally {
+      setTestingPhase('');
     }
   };
 
   const testAuthOperations = async () => {
-    console.log('=== Testing Auth Operations ===');
+    setTestingPhase('Auth testen...');
+    console.log('=== Testing Auth Operations with SupabaseService ===');
     
     try {
-      // Test sign up (will likely fail but we can see the API call)
+      let authSuccess = true;
+
+      // Test 1: Get current session
+      console.log('Testing current session...');
+      const { session, error: sessionError } = await SupabaseService.getCurrentUser();
+      if (sessionError) {
+        console.log('Session error:', sessionError);
+        authSuccess = false;
+      }
+
+      // Test 2: Try sign up with test email (will likely fail - user exists or email not valid)
+      console.log('Testing sign up...');
       const signUpResult = await SupabaseService.signUp(
-        'test@example.com', 
+        `test-${Date.now()}@example.com`, 
         'testpassword123'
       );
 
-      // Test getting current session again
-      const { session } = await SupabaseService.getCurrentUser();
+      if (!signUpResult.success) {
+        console.log('Sign up failed (expected):', signUpResult.error);
+      } else {
+        console.log('Sign up successful:', signUpResult.message);
+      }
+
+      // Test 3: Try sign in with invalid credentials (should fail)
+      console.log('Testing sign in with invalid credentials...');
+      const signInResult = await SupabaseService.signIn(
+        'invalid@example.com',
+        'wrongpassword'
+      );
+
+      if (!signInResult.success) {
+        console.log('Sign in failed (expected):', signInResult.error);
+      }
+
+      // Test 4: Test sign out (should work regardless of auth state)
+      console.log('Testing sign out...');
+      const signOutResult = await SupabaseService.signOut();
+      if (!signOutResult.success) {
+        console.log('Sign out failed:', signOutResult.error);
+        authSuccess = false;
+      }
+
+      setTestResults(prev => ({ ...prev, auth: authSuccess }));
 
       Alert.alert(
         'Auth Test Results',
-        `Sign Up: ${signUpResult.success ? 'Success' : 'Failed'}\n` +
-        `Current Session: ${session ? 'Authenticated' : 'Not authenticated'}\n` +
-        `${signUpResult.error || signUpResult.message || ''}`,
+        `Authentication test completed.\n\n` +
+        `Current Session: ${session ? '✅ Authenticated' : '❌ Not authenticated'}\n` +
+        `Sign Up Test: ${signUpResult.success ? '✅ Success' : '⚠️ Failed (expected)'}\n` +
+        `Sign In Test: ${signInResult.success ? '✅ Success' : '⚠️ Failed (expected)'}\n` +
+        `Sign Out Test: ${signOutResult.success ? '✅ Success' : '❌ Failed'}\n\n` +
+        `Note: Sign up/in failures are expected with test credentials.`,
         [{ text: 'OK' }]
       );
 
@@ -229,30 +394,88 @@ const SupabaseDebugger: React.FC = () => {
         status: 'error',
         error: err instanceof Error ? err.message : 'Unknown error'
       });
+      setTestResults(prev => ({ ...prev, auth: false }));
+    } finally {
+      setTestingPhase('');
     }
   };
 
   const testRLSPolicies = async () => {
+    setTestingPhase('RLS Policies testen...');
     console.log('=== Testing RLS Policies ===');
     
     try {
+      let rlsWorking = true;
+
       // Test accessing tables without authentication (should fail due to RLS)
       const tables = ['users', 'daily_entries', 'activities', 'progress_photos'];
+      const testResults: { [key: string]: { success: boolean; error?: string } } = {};
       
       for (const table of tables) {
-        const { data, error } = await supabase
+        console.log(`Testing RLS on ${table}...`);
+        
+        // Test SELECT
+        const { data: selectData, error: selectError } = await supabase
           .from(table)
           .select('*')
           .limit(1);
 
+        // Test INSERT (should fail)
+        let insertError: any = null;
+        try {
+          const { error } = await supabase
+            .from(table)
+            .insert({});
+          insertError = error;
+        } catch (e) {
+          insertError = e;
+        }
+
+        testResults[table] = {
+          success: !!selectError && !!insertError, // RLS working if both operations fail
+          error: selectError?.message || insertError?.message
+        };
+
         addApiCall({
           method: 'RLS_TEST',
           endpoint: `${table} (RLS check)`,
-          status: error ? 'error' : 'success',
-          data: data ? `${data.length} rows` : 'No data',
-          error: error?.message
+          status: testResults[table].success ? 'success' : 'error',
+          data: selectData ? `${selectData.length} rows (RLS bypassed!)` : 'Access denied (RLS working)',
+          error: testResults[table].error
         });
+
+        if (!testResults[table].success) {
+          rlsWorking = false;
+        }
       }
+
+      // Test specific RLS policies
+      console.log('Testing specific RLS policy enforcement...');
+      
+      // Try to access another user's data (should fail)
+      const { data: otherUserData, error: otherUserError } = await supabase
+        .from('daily_entries')
+        .select('*')
+        .eq('user_id', '11111111-1111-1111-1111-111111111111')
+        .limit(1);
+
+      addApiCall({
+        method: 'RLS_POLICY_TEST',
+        endpoint: 'daily_entries (other user)',
+        status: otherUserError ? 'success' : 'error',
+        data: otherUserData ? `${otherUserData.length} rows (RLS bypassed!)` : 'Access denied (RLS working)',
+        error: otherUserError?.message
+      });
+
+      setTestResults(prev => ({ ...prev, rls: rlsWorking }));
+
+      let resultMessage = 'RLS Policies Test Results:\n\n';
+      for (const [table, result] of Object.entries(testResults)) {
+        resultMessage += `${table}: ${result.success ? '✅ Protected' : '❌ Vulnerable'}\n`;
+      }
+      resultMessage += `\nOverall RLS Status: ${rlsWorking ? '✅ Working' : '❌ Issues detected'}`;
+
+      Alert.alert('RLS Test Results', resultMessage, [{ text: 'OK' }]);
 
       console.log('=== RLS Policies Test Completed ===');
       
@@ -264,7 +487,36 @@ const SupabaseDebugger: React.FC = () => {
         status: 'error',
         error: err instanceof Error ? err.message : 'Unknown error'
       });
+      setTestResults(prev => ({ ...prev, rls: false }));
+    } finally {
+      setTestingPhase('');
     }
+  };
+
+  const runAllTests = async () => {
+    setIsLoading(true);
+    console.log('=== Running All Comprehensive Tests ===');
+    
+    await testConnection();
+    await testDatabaseOperations();
+    await testAuthOperations();
+    await testRLSPolicies();
+    
+    setIsLoading(false);
+    
+    const overallResults = Object.values(testResults);
+    const successCount = overallResults.filter(Boolean).length;
+    
+    Alert.alert(
+      'All Tests Completed',
+      `Test Results Summary:\n\n` +
+      `✅ Connection: ${testResults.connection ? 'Pass' : 'Fail'}\n` +
+      `🗄️ Database: ${testResults.database ? 'Pass' : 'Fail'}\n` +
+      `🔐 Auth: ${testResults.auth ? 'Pass' : 'Fail'}\n` +
+      `🛡️ RLS: ${testResults.rls ? 'Pass' : 'Fail'}\n\n` +
+      `Overall: ${successCount}/4 tests passed`,
+      [{ text: 'OK' }]
+    );
   };
 
   const clearApiCalls = () => {
@@ -275,17 +527,24 @@ const SupabaseDebugger: React.FC = () => {
   const exportDebugInfo = () => {
     const debugInfo = {
       connectionStatus,
+      testResults,
       apiCalls: apiCalls.slice(0, 20), // Last 20 calls
       timestamp: new Date().toISOString(),
-      projectId: 'fvzhybddmulufmfjuvwl'
+      projectId: 'fvzhybddmulufmfjuvwl',
+      supabaseUrl: supabase.supabaseUrl,
+      environment: __DEV__ ? 'development' : 'production'
     };
     
-    console.log('=== DEBUG INFO EXPORT ===');
+    console.log('=== COMPREHENSIVE DEBUG INFO EXPORT ===');
     console.log(JSON.stringify(debugInfo, null, 2));
     
     Alert.alert(
       'Debug Info Exported',
-      'Debug information has been logged to console. Check the developer console for details.',
+      'Comprehensive debug information has been logged to console. Check the developer console for detailed information including:\n\n' +
+      '• Connection status\n' +
+      '• Test results\n' +
+      '• API call history\n' +
+      '• Project configuration',
       [{ text: 'OK' }]
     );
   };
@@ -299,12 +558,54 @@ const SupabaseDebugger: React.FC = () => {
     }
   };
 
+  const getTestStatusIcon = (passed: boolean) => {
+    return passed ? '✅' : '❌';
+  };
+
   return (
     <SafeAreaView style={[commonStyles.container, { backgroundColor: colors.background }]}>
       <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
         <Text style={[commonStyles.title, { color: colors.text, marginBottom: 20 }]}>
           🔧 Supabase Debugger
         </Text>
+
+        {/* Loading indicator */}
+        {isLoading && (
+          <View style={[styles.section, { backgroundColor: colors.warning, marginBottom: 10 }]}>
+            <Text style={[styles.loadingText, { color: colors.background }]}>
+              ⏳ {testingPhase || 'Testing...'}
+            </Text>
+          </View>
+        )}
+
+        {/* Test Results Summary */}
+        <View style={[styles.section, { backgroundColor: colors.card }]}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>
+            📊 Test Results Summary
+          </Text>
+          <View style={styles.testResultsGrid}>
+            <View style={styles.testResultItem}>
+              <Text style={[styles.testResultLabel, { color: colors.text }]}>
+                {getTestStatusIcon(testResults.connection)} Connection
+              </Text>
+            </View>
+            <View style={styles.testResultItem}>
+              <Text style={[styles.testResultLabel, { color: colors.text }]}>
+                {getTestStatusIcon(testResults.database)} Database
+              </Text>
+            </View>
+            <View style={styles.testResultItem}>
+              <Text style={[styles.testResultLabel, { color: colors.text }]}>
+                {getTestStatusIcon(testResults.auth)} Auth
+              </Text>
+            </View>
+            <View style={styles.testResultItem}>
+              <Text style={[styles.testResultLabel, { color: colors.text }]}>
+                {getTestStatusIcon(testResults.rls)} RLS
+              </Text>
+            </View>
+          </View>
+        </View>
 
         {/* Connection Status */}
         <View style={[styles.section, { backgroundColor: colors.card }]}>
@@ -338,11 +639,25 @@ const SupabaseDebugger: React.FC = () => {
             </Text>
           </View>
           <View style={styles.statusRow}>
+            <Text style={[styles.statusLabel, { color: colors.text }]}>RLS Policies:</Text>
+            <Text style={[styles.statusValue, { color: colors.text }]}>
+              {connectionStatus.rlsPoliciesCount}
+            </Text>
+          </View>
+          <View style={styles.statusRow}>
             <Text style={[styles.statusLabel, { color: colors.text }]}>Letzter Check:</Text>
             <Text style={[styles.statusValue, { color: colors.text }]}>
               {connectionStatus.lastChecked}
             </Text>
           </View>
+          {connectionStatus.currentUserId && (
+            <View style={styles.statusRow}>
+              <Text style={[styles.statusLabel, { color: colors.text }]}>User ID:</Text>
+              <Text style={[styles.statusValue, { color: colors.text }]} numberOfLines={1}>
+                {connectionStatus.currentUserId.substring(0, 8)}...
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Test Buttons */}
@@ -350,45 +665,63 @@ const SupabaseDebugger: React.FC = () => {
           <Text style={[styles.sectionTitle, { color: colors.text }]}>
             🧪 Tests
           </Text>
+          
           <TouchableOpacity
             style={[buttonStyles.primary, { marginBottom: 10 }]}
-            onPress={testConnection}
+            onPress={runAllTests}
             disabled={isLoading}
           >
             <Text style={[buttonStyles.primaryText, { color: colors.background }]}>
-              {isLoading ? '⏳ Teste...' : '🔄 Verbindung testen'}
-            </Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity
-            style={[buttonStyles.secondary, { marginBottom: 10 }]}
-            onPress={testDatabaseOperations}
-          >
-            <Text style={[buttonStyles.secondaryText, { color: colors.background }]}>
-              🗄️ Datenbank testen
-            </Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity
-            style={[buttonStyles.outline, { marginBottom: 10, borderColor: colors.warning }]}
-            onPress={testAuthOperations}
-          >
-            <Text style={[buttonStyles.secondaryText, { color: colors.warning }]}>
-              🔐 Auth testen
+              {isLoading ? '⏳ Teste...' : '🚀 Alle Tests ausführen'}
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[buttonStyles.outline, { marginBottom: 10, borderColor: colors.purple }]}
-            onPress={testRLSPolicies}
-          >
-            <Text style={[buttonStyles.secondaryText, { color: colors.purple }]}>
-              🛡️ RLS Policies testen
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[buttonStyles.secondary, styles.halfButton]}
+              onPress={testConnection}
+              disabled={isLoading}
+            >
+              <Text style={[buttonStyles.secondaryText, { color: colors.background }]}>
+                🔄 Verbindung
+              </Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity
+              style={[buttonStyles.secondary, styles.halfButton]}
+              onPress={testDatabaseOperations}
+              disabled={isLoading}
+            >
+              <Text style={[buttonStyles.secondaryText, { color: colors.background }]}>
+                🗄️ Datenbank
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[buttonStyles.outline, styles.halfButton, { borderColor: colors.warning }]}
+              onPress={testAuthOperations}
+              disabled={isLoading}
+            >
+              <Text style={[buttonStyles.secondaryText, { color: colors.warning }]}>
+                🔐 Auth
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[buttonStyles.outline, styles.halfButton, { borderColor: colors.purple }]}
+              onPress={testRLSPolicies}
+              disabled={isLoading}
+            >
+              <Text style={[buttonStyles.secondaryText, { color: colors.purple }]}>
+                🛡️ RLS
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity
-            style={[buttonStyles.outline, { marginBottom: 10, borderColor: colors.blue }]}
+            style={[buttonStyles.outline, { marginTop: 10, borderColor: colors.blue }]}
             onPress={exportDebugInfo}
           >
             <Text style={[buttonStyles.secondaryText, { color: colors.blue }]}>
@@ -483,6 +816,25 @@ const styles = {
     fontSize: 14,
     fontWeight: '600' as const,
   },
+  loadingText: {
+    textAlign: 'center' as const,
+    fontSize: 16,
+    fontWeight: '600' as const,
+    padding: 10,
+  },
+  testResultsGrid: {
+    flexDirection: 'row' as const,
+    flexWrap: 'wrap' as const,
+    justifyContent: 'space-between' as const,
+  },
+  testResultItem: {
+    width: '48%',
+    marginBottom: 8,
+  },
+  testResultLabel: {
+    fontSize: 14,
+    fontWeight: '500' as const,
+  },
   statusRow: {
     flexDirection: 'row' as const,
     justifyContent: 'space-between' as const,
@@ -498,6 +850,14 @@ const styles = {
     fontSize: 14,
     flex: 2,
     textAlign: 'right' as const,
+  },
+  buttonRow: {
+    flexDirection: 'row' as const,
+    justifyContent: 'space-between' as const,
+    marginBottom: 10,
+  },
+  halfButton: {
+    width: '48%',
   },
   emptyText: {
     textAlign: 'center' as const,
